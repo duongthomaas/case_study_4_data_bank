@@ -142,30 +142,74 @@ group by month;
 
 -- // 4) What is the closing balance for each customer at the end of the month?
 
-WITH CTE AS (
-SELECT 
-DATE_TRUNC('month',txn_date) as txn_month,
-txn_date,
-customer_id,
-SUM((CASE WHEN txn_type ='deposit' THEN txn_amount ELSE 0 END) - (CASE WHEN txn_type <>'deposit' THEN txn_amount ELSE 0 END)) as balance
-FROM customer_transactions
-GROUP BY DATE_TRUNC('month',txn_date),
-txn_date,
-customer_id
+with cte as (
+    select
+        date_trunc('month', txn_date) as txn_month ,
+        txn_date ,
+        customer_id ,
+        sum( (case when txn_type = 'deposit' then txn_amount else 0 end) - (case when txn_type <> 'deposit' then txn_amount else 0 end) ) as balance 
+    from customer_transactions
+    group by txn_month, txn_date, customer_id
+) , balances as (
+    select
+       * ,
+       sum(balance) over (partition by customer_id order by txn_date) as running_sum ,
+       row_number() over (partition by customer_id, txn_month order by txn_date desc) as rn 
+    from cte
+    order by txn_date
 )
-, BALANCES AS (
-SELECT 
-*
-,SUM(balance) OVER (PARTITION BY customer_id ORDER BY txn_date) as running_sum
-,ROW_NUMBER() OVER (PARTITION BY customer_id, txn_month ORDER BY txn_date DESC) as rn
-FROM CTE
-ORDER BY txn_date
+select
+    customer_id ,
+    dateadd('day',-1,dateadd('month', 1, txn_date)) as end_of_month ,
+    running_sum as closing_balance 
+from balances
+where rn = 1 ;
+
+-- 5) What is the percentage of customers who increase their closing balance by more than 5%?
+
+with cte as (
+    select
+        date_trunc('month',txn_date) as txn_month ,
+        txn_date ,
+        customer_id ,
+        sum ((case when txn_type = 'deposit' then txn_amount else 0 end) - (case when txn_type <> 'deposit' then txn_amount else 0 end)) as balance 
+    from customer_transactions
+    group by
+        date_trunc('month',txn_date) ,
+        txn_date ,
+        customer_id
+), balances as (
+    select
+        * ,
+        sum(balance) over (partition by customer_id order by txn_date) as running_sum ,
+        row_number () over (partition by customer_id, txn_month order by txn_date desc) as rn
+    from cte
+    order by txn_date
+), closing_balances as (
+    select
+        customer_id ,
+        dateadd('day',-1,dateadd('month',1,txn_month)) as end_of_month,
+        dateadd('day',-1,txn_month) as previous_end_of_month,
+        running_sum as closing_balance 
+    from balances
+    where rn = 1
+    order by end_of_month
+), percentage_increase as (
+    select
+        cb1.customer_id ,
+        cb1.end_of_month ,
+        cb1.closing_balance ,
+        cb2.closing_balance as next_month_closing_balance ,
+        (cb2.closing_balance / cb1.closing_balance) - 1 as percentage_increase ,
+        (case when (cb2.closing_balance < cb1.closing_balance and (cb2.closing_balance / cb1.closing_balance) -1 > 0.05) then 1 else 0 end) as percentage_increase_flag
+    from closing_balances as cb1
+    inner join closing_balances as cb2
+    on cb1.end_of_month = cb2.previous_end_of_month
+    and cb1.customer_id = cb2.customer_id
+    where cb1.closing_balance <> 0
 )
-SELECT 
-customer_id,
-DATEADD('day',-1,DATEADD('month',1,txn_month)) as end_of_month,
-running_sum as closing_balance
-FROM BALANCES 
-WHERE rn = 1;
+select
+    sum(percentage_increase_flag) / count (percentage_increase_flag) as percentage_of_customers_increasing_balance
+from percentage_increase;
 
-
+-- End
